@@ -226,6 +226,77 @@ test('login attempts share a bounded rate limit independent of forwarded IPs', a
   assert.ok(Number(limited.headers['retry-after']) > 0)
 })
 
+test('rate limits are unaffected by changes to the system clock', async t => {
+  const { app } = await fixture(t)
+  const request = {
+    url: '/api/auth/login',
+    method: 'POST' as const,
+    payload: { password: '' },
+  }
+  for (let attempt = 0; attempt < 5; attempt++) {
+    assert.equal((await app.inject(request)).statusCode, 400)
+  }
+
+  const now = Date.now()
+  for (const offset of [-3_600_000, 3_600_000]) {
+    const clock = t.mock.method(Date, 'now', () => now + offset)
+    const limited = await app.inject(request)
+    assert.equal(limited.statusCode, 429)
+    const retryAfter = Number(limited.headers['retry-after'])
+    assert.ok(retryAfter > 0 && retryAfter <= 12)
+    clock.mock.restore()
+  }
+})
+
+test('content and backup routes reject malformed request envelopes without writing data', async t => {
+  const { app, password } = await fixture(t)
+  const headers = { cookie: await signIn(app, password) }
+  const current = (
+    await app.inject({ headers, url: '/api/admin/content' })
+  ).json<SavedContent>()
+  const backup = (
+    await app.inject({ headers, url: '/api/admin/backups/current' })
+  ).json()
+
+  for (const request of [
+    {
+      method: 'PUT' as const,
+      url: '/api/admin/content',
+      body: { content: current.content },
+    },
+    {
+      body: { backup },
+      method: 'POST' as const,
+      url: '/api/admin/backups/restore',
+    },
+  ]) {
+    for (const payload of [
+      request.body,
+      { ...request.body, baseRevision: '1' },
+      { ...request.body, baseRevision: Number.MAX_SAFE_INTEGER + 1 },
+      { ...request.body, unexpected: true, baseRevision: current.revision },
+    ]) {
+      const response = await app.inject({
+        headers,
+        payload,
+        url: request.url,
+        method: request.method,
+      })
+      assert.equal(response.statusCode, 400, response.body)
+      assert.equal(response.json().error, 'VALIDATION_ERROR')
+    }
+  }
+  assert.deepEqual(
+    (await app.inject({ headers, url: '/api/admin/content' })).json(),
+    current,
+  )
+  assert.equal(
+    (await app.inject({ headers, url: '/api/admin/revisions' })).json()
+      .revisions.length,
+    1,
+  )
+})
+
 test('content publishes immediately, filters hidden data and restores through a new revision', async t => {
   const { app, password } = await fixture(t)
   const headers = { cookie: await signIn(app, password) }
@@ -465,7 +536,11 @@ test('checkout is an idempotent simulation using server prices and rejecting pay
     })
     assert.equal(invalid.statusCode, 400)
   }
-  for (const field of [{ cardNumber: '4242424242424242' }, { priceMinor: 1 }]) {
+  for (const field of [
+    { cardNumber: '4242424242424242' },
+    { priceMinor: 1 },
+    { idempotencyKey: randomUUID() },
+  ]) {
     const invalid = await app.inject({
       method: 'POST',
       url: '/api/checkout',

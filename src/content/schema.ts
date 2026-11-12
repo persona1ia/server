@@ -5,6 +5,12 @@ const mediaIdSchema = z.string().regex(/^[a-f0-9]{64}$/)
 const titleSchema = z.string().max(200)
 const textSchema = z.string().max(20_000)
 
+export const revisionIdSchema = z
+  .number()
+  .int()
+  .positive()
+  .max(Number.MAX_SAFE_INTEGER)
+
 const urlSchema = z
   .string()
   .max(2048)
@@ -178,3 +184,8 @@ export const siteContentSchema = z
       }
     }
   })
+
+export const saveContentSchema = z.strictObject({
+  content: siteContentSchema,
+  baseRevision: revisionIdSchema,
+})

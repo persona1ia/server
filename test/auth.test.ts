@@ -4,6 +4,8 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { rmdirSync, unlinkSync, mkdtempSync } from 'node:fs'
 
+import { ZodError } from 'zod'
+
 import { AppError } from '../src/errors/index.js'
 import { openDatabase } from '../src/storage/index.js'
 import {
@@ -20,11 +22,35 @@ test('password must be initialized with the reset command', async t => {
   t.after(() => db.close())
 
   assert.equal(isPasswordConfigured(db), false)
-  await assert.rejects(login(db, 'anything'), error => {
+  await assert.rejects(login(db, { password: 'anything' }), error => {
     assert.ok(error instanceof AppError)
     assert.equal(error.statusCode, 503)
     return true
   })
+})
+
+test('login validates credentials before creating a session', async t => {
+  const db = openDatabase(':memory:')
+  t.after(() => db.close())
+  const password = await resetPassword(db)
+
+  for (const input of [
+    undefined,
+    password,
+    {},
+    { password: '' },
+    { password: 123 },
+    { password: 'a'.repeat(1025) },
+    { password, unexpected: true },
+  ]) {
+    await assert.rejects(login(db, input), ZodError)
+  }
+
+  assert.equal(
+    db.prepare('SELECT COUNT(*) AS count FROM sessions').get()?.count,
+    0,
+  )
+  assert.equal(authenticate(db, (await login(db, { password })).token), true)
 })
 
 test('login stores only a token hash and logout invalidates the session', async t => {
@@ -38,13 +64,13 @@ test('login stores only a token hash and logout invalidates the session', async 
     db.prepare('SELECT hash FROM admin_password WHERE id = 1').get()?.hash,
     password,
   )
-  await assert.rejects(login(db, 'wrong-password'), error => {
+  await assert.rejects(login(db, { password: 'wrong-password' }), error => {
     assert.ok(error instanceof AppError)
     assert.equal(error.statusCode, 401)
     return true
   })
 
-  const session = await login(db, password)
+  const session = await login(db, { password })
   assert.equal(authenticate(db, session.token), true)
   assert.notEqual(
     db.prepare('SELECT token_hash FROM sessions').get()?.token_hash,
@@ -60,7 +86,7 @@ test('expired sessions cannot authenticate', async t => {
   const db = openDatabase(':memory:')
   t.after(() => db.close())
   const password = await resetPassword(db)
-  const session = await login(db, password)
+  const session = await login(db, { password })
   db.prepare('UPDATE sessions SET expires_at = ?').run(Date.now() - 1)
 
   assert.equal(authenticate(db, session.token), false)
@@ -74,20 +100,23 @@ test('resetting the password revokes old sessions and old credentials', async t 
   const db = openDatabase(':memory:')
   t.after(() => db.close())
   const oldPassword = await resetPassword(db)
-  const session = await login(db, oldPassword)
+  const session = await login(db, { password: oldPassword })
   const newPassword = await resetPassword(db)
 
   assert.notEqual(newPassword, oldPassword)
   assert.equal(authenticate(db, session.token), false)
-  await assert.rejects(login(db, oldPassword))
-  assert.equal(authenticate(db, (await login(db, newPassword)).token), true)
+  await assert.rejects(login(db, { password: oldPassword }))
+  assert.equal(
+    authenticate(db, (await login(db, { password: newPassword })).token),
+    true,
+  )
 })
 
 test('a password change during verification cannot issue an old session', async t => {
   const db = openDatabase(':memory:')
   t.after(() => db.close())
   const password = await resetPassword(db)
-  const pendingLogin = login(db, password)
+  const pendingLogin = login(db, { password })
   db.prepare('UPDATE admin_password SET hash = ? WHERE id = 1').run('changed')
 
   await assert.rejects(pendingLogin, error => {
@@ -113,13 +142,16 @@ test('a separate connection can reset the password without restarting the server
     rmdirSync(directory)
   })
   const oldPassword = await resetPassword(commandDb)
-  const oldSession = await login(serverDb, oldPassword)
+  const oldSession = await login(serverDb, { password: oldPassword })
   const newPassword = await resetPassword(commandDb)
 
   assert.equal(authenticate(serverDb, oldSession.token), false)
-  await assert.rejects(login(serverDb, oldPassword))
+  await assert.rejects(login(serverDb, { password: oldPassword }))
   assert.equal(
-    authenticate(serverDb, (await login(serverDb, newPassword)).token),
+    authenticate(
+      serverDb,
+      (await login(serverDb, { password: newPassword })).token,
+    ),
     true,
   )
 })
@@ -128,8 +160,8 @@ test('changing the password revokes every old session and preserves the chosen p
   const db = openDatabase(':memory:')
   t.after(() => db.close())
   const oldPassword = await resetPassword(db)
-  const first = await login(db, oldPassword)
-  const second = await login(db, oldPassword)
+  const first = await login(db, { password: oldPassword })
+  const second = await login(db, { password: oldPassword })
   const newPassword = '  chosen password with spaces  '
 
   const session = await changePassword(db, {
@@ -145,16 +177,23 @@ test('changing the password revokes every old session and preserves the chosen p
     db.prepare('SELECT COUNT(*) AS count FROM sessions').get()?.count,
     1,
   )
-  await assert.rejects(login(db, oldPassword), { statusCode: 401 })
-  await assert.rejects(login(db, newPassword.trim()), { statusCode: 401 })
-  assert.equal(authenticate(db, (await login(db, newPassword)).token), true)
+  await assert.rejects(login(db, { password: oldPassword }), {
+    statusCode: 401,
+  })
+  await assert.rejects(login(db, { password: newPassword.trim() }), {
+    statusCode: 401,
+  })
+  assert.equal(
+    authenticate(db, (await login(db, { password: newPassword })).token),
+    true,
+  )
 })
 
 test('an incorrect current password leaves the password and sessions unchanged', async t => {
   const db = openDatabase(':memory:')
   t.after(() => db.close())
   const password = await resetPassword(db)
-  const session = await login(db, password)
+  const session = await login(db, { password })
   const previousPassword = db.prepare('SELECT * FROM admin_password').get()
   const previousSessions = db.prepare('SELECT * FROM sessions').all()
 
@@ -172,14 +211,14 @@ test('an incorrect current password leaves the password and sessions unchanged',
   )
   assert.deepEqual(db.prepare('SELECT * FROM sessions').all(), previousSessions)
   assert.equal(authenticate(db, session.token), true)
-  assert.equal(authenticate(db, (await login(db, password)).token), true)
+  assert.equal(authenticate(db, (await login(db, { password })).token), true)
 })
 
 test('a concurrent password change is not overwritten and does not delete existing sessions', async t => {
   const db = openDatabase(':memory:')
   t.after(() => db.close())
   const password = await resetPassword(db)
-  const session = await login(db, password)
+  const session = await login(db, { password })
   const previousSessions = db.prepare('SELECT * FROM sessions').all()
   const pendingChange = changePassword(db, {
     currentPassword: password,
@@ -193,6 +232,56 @@ test('a concurrent password change is not overwritten and does not delete existi
   assert.equal(
     db.prepare('SELECT hash FROM admin_password WHERE id = 1').get()?.hash,
     'concurrent-change',
+  )
+  assert.deepEqual(db.prepare('SELECT * FROM sessions').all(), previousSessions)
+  assert.equal(authenticate(db, session.token), true)
+})
+
+test('a failed password reset preserves the previous password and sessions', async t => {
+  const db = openDatabase(':memory:')
+  t.after(() => db.close())
+  const password = await resetPassword(db)
+  const session = await login(db, { password })
+  const previousPassword = db.prepare('SELECT * FROM admin_password').get()
+  const previousSessions = db.prepare('SELECT * FROM sessions').all()
+  db.exec(`
+    CREATE TRIGGER fail_session_delete BEFORE DELETE ON sessions
+    BEGIN SELECT RAISE(ABORT, 'session deletion failed'); END;
+  `)
+
+  await assert.rejects(resetPassword(db), /session deletion failed/)
+
+  assert.deepEqual(
+    db.prepare('SELECT * FROM admin_password').get(),
+    previousPassword,
+  )
+  assert.deepEqual(db.prepare('SELECT * FROM sessions').all(), previousSessions)
+  assert.equal(authenticate(db, session.token), true)
+})
+
+test('a failed replacement session rolls back the complete password change', async t => {
+  const db = openDatabase(':memory:')
+  t.after(() => db.close())
+  const password = await resetPassword(db)
+  const session = await login(db, { password })
+  const previousPassword = db.prepare('SELECT * FROM admin_password').get()
+  const previousSessions = db.prepare('SELECT * FROM sessions').all()
+  db.exec(`
+    CREATE TRIGGER fail_session_insert BEFORE INSERT ON sessions
+    BEGIN SELECT RAISE(ABORT, 'session creation failed'); END;
+  `)
+
+  await assert.rejects(
+    changePassword(db, {
+      currentPassword: password,
+      newPassword: 'chosen-new-password',
+    }),
+    /session creation failed/,
+  )
+
+  assert.deepEqual(
+    db.prepare('SELECT * FROM admin_password').get(),
+    previousPassword,
   )
   assert.deepEqual(db.prepare('SELECT * FROM sessions').all(), previousSessions)
   assert.equal(authenticate(db, session.token), true)

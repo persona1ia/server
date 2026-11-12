@@ -59,8 +59,9 @@ test('reopening a file database preserves content, history, images and idempoten
         courses: [{ ...course, imageId: image.id }],
       },
     })
-    const checkout = { courseId: course.id, idempotencyKey: randomUUID() }
-    const order = simulateCheckout(db, checkout)
+    const checkout = { courseId: course.id }
+    const idempotencyKey = randomUUID()
+    const order = simulateCheckout(db, checkout, idempotencyKey)
 
     db.close()
     db = openDatabase(path)
@@ -73,7 +74,10 @@ test('reopening a file database preserves content, history, images and idempoten
       listOrders(db).map(item => ({ ...item })),
       [order],
     )
-    assert.deepEqual({ ...simulateCheckout(db, checkout) }, order)
+    assert.deepEqual(
+      { ...simulateCheckout(db, checkout, idempotencyKey) },
+      order,
+    )
     assert.equal(listOrders(db).length, 1)
   } finally {
     if (db.isOpen) {
@@ -189,10 +193,7 @@ test('an outer failure rolls back successful nested content, media and order ope
             courses: [{ ...course, imageId: image.id }],
           },
         })
-        simulateCheckout(db, {
-          courseId: course.id,
-          idempotencyKey: randomUUID(),
-        })
+        simulateCheckout(db, { courseId: course.id }, randomUUID())
         throw failure
       }),
     failure,

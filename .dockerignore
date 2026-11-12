@@ -4,6 +4,7 @@ node_modules
 dist
 coverage
 data
+server-data
 test
 *.log
 .env

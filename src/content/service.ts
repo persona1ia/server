@@ -3,23 +3,20 @@ import type { DatabaseSync } from 'node:sqlite'
 import { z } from 'zod'
 
 import { AppError } from '../errors/index.js'
-import { siteContentSchema } from './schema.js'
 import { transaction } from '../storage/index.js'
 import { createDefaultContent } from './defaults.js'
 import { MAX_CONTENT_BYTES, MAX_CONTENT_MEDIA_BYTES } from './limits.js'
+import {
+  revisionIdSchema,
+  saveContentSchema,
+  siteContentSchema,
+} from './schema.js'
 import type {
   RevisionRow,
   SiteContent,
   SavedContent,
   RevisionSummary,
-  SaveContentInput,
 } from './types.js'
-
-const revisionIdSchema = z
-  .number()
-  .int()
-  .positive()
-  .max(Number.MAX_SAFE_INTEGER)
 
 export function initializeContent(db: DatabaseSync): void {
   transaction(db, () => {
@@ -84,12 +81,8 @@ export function listRevisions(
   }))
 }
 
-export function saveContent(
-  db: DatabaseSync,
-  input: SaveContentInput,
-): SavedContent {
-  const baseRevision = revisionIdSchema.parse(input.baseRevision)
-  const content = siteContentSchema.parse(input.content)
+export function saveContent(db: DatabaseSync, input: unknown): SavedContent {
+  const { content, baseRevision } = saveContentSchema.parse(input)
 
   return transaction(db, () => {
     requireCurrentRevision(db, baseRevision)

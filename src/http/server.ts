@@ -42,6 +42,7 @@ import {
   getPublicContent,
   initializeContent,
   siteContentSchema,
+  MAX_CONTENT_BYTES,
 } from '../content/index.js'
 
 const revisionSchema = z.coerce
@@ -63,6 +64,7 @@ const paginationSchema = z.strictObject({
     .max(Number.MAX_SAFE_INTEGER)
     .default(0),
 })
+const contentJsonSchema = z.toJSONSchema(siteContentSchema)
 
 export function createHttpServer(options: ServerOptions = {}) {
   const db = options.database ?? openDatabase(options.databasePath)
@@ -70,7 +72,7 @@ export function createHttpServer(options: ServerOptions = {}) {
   const secureCookies =
     options.secureCookies ?? process.env.NODE_ENV === 'production'
   const app = Fastify({
-    bodyLimit: 1024 * 1024,
+    bodyLimit: MAX_CONTENT_BYTES,
     logger: options.logger ?? false,
   })
   const cookieOptions = {
@@ -153,10 +155,7 @@ export function createHttpServer(options: ServerOptions = {}) {
     '/api/auth/login',
     { onRequest: rateLimit(5, 12_000) },
     async (request, reply) => {
-      const { password } = z
-        .strictObject({ password: z.string().min(1).max(1024) })
-        .parse(request.body)
-      const session = await login(db, password)
+      const session = await login(db, request.body)
       return sendSession(reply, session)
     },
   )
@@ -173,13 +172,11 @@ export function createHttpServer(options: ServerOptions = {}) {
     '/api/checkout',
     { onRequest: rateLimit(30, 2000) },
     async (request, reply) => {
-      const body = z
-        .strictObject({ courseId: z.string().min(1).max(100) })
-        .parse(request.body)
-      const order = simulateCheckout(db, {
-        ...body,
-        idempotencyKey: request.headers['idempotency-key'],
-      })
+      const order = simulateCheckout(
+        db,
+        request.body,
+        request.headers['idempotency-key'],
+      )
       return reply.status(201).send({ order, simulation: true })
     },
   )
@@ -196,21 +193,8 @@ export function createHttpServer(options: ServerOptions = {}) {
         },
       )
       admin.get('/content', async () => getCurrent(db))
-      admin.get('/content/schema', async () =>
-        z.toJSONSchema(siteContentSchema),
-      )
-      admin.put('/content', async request => {
-        const input = z
-          .strictObject({
-            content: z.unknown(),
-            baseRevision: z.number().int().positive(),
-          })
-          .parse(request.body)
-        return saveContent(db, {
-          content: input.content,
-          baseRevision: input.baseRevision,
-        })
-      })
+      admin.get('/content/schema', async () => contentJsonSchema)
+      admin.put('/content', async request => saveContent(db, request.body))
       admin.get('/revisions', async request => {
         const { limit, before } = z
           .strictObject({
@@ -247,18 +231,7 @@ export function createHttpServer(options: ServerOptions = {}) {
       admin.post(
         '/backups/restore',
         { bodyLimit: MAX_BACKUP_BYTES },
-        async request => {
-          const input = z
-            .strictObject({
-              backup: z.unknown(),
-              baseRevision: z.number().int().positive(),
-            })
-            .parse(request.body)
-          return restoreBackup(db, {
-            backup: input.backup,
-            baseRevision: input.baseRevision,
-          })
-        },
+        async request => restoreBackup(db, request.body),
       )
       admin.get('/media', async request => {
         const { limit, offset } = paginationSchema.parse(request.query)

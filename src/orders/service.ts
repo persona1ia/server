@@ -9,15 +9,20 @@ import { getCurrent } from '../content/index.js'
 import { transaction } from '../storage/index.js'
 
 const checkoutSchema = z.strictObject({
-  idempotencyKey: z.uuid(),
   courseId: z.string().min(1).max(100),
 })
+const idempotencyKeySchema = z.uuid()
 
 const orderColumns = `id, course_id AS courseId, course_title AS courseTitle,
   price_minor AS priceMinor, currency, status, created_at AS createdAt`
 
-export function simulateCheckout(db: DatabaseSync, input: unknown): Order {
-  const { courseId, idempotencyKey } = checkoutSchema.parse(input)
+export function simulateCheckout(
+  db: DatabaseSync,
+  input: unknown,
+  key: unknown,
+): Order {
+  const { courseId } = checkoutSchema.parse(input)
+  const idempotencyKey = idempotencyKeySchema.parse(key)
   return transaction(db, () => {
     const existing = db
       .prepare(`SELECT ${orderColumns} FROM orders WHERE idempotency_key = ?`)

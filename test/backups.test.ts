@@ -75,7 +75,13 @@ test('corrupt, missing, duplicated or extra backup media leave storage unchanged
   const first = original.media[0]
   assert.ok(first)
   const corrupt = structuredClone(original)
-  corrupt.media = [{ ...first, dataBase64: gif.toString('base64') }]
+  corrupt.media = [
+    { ...first, mimeType: 'image/gif', dataBase64: gif.toString('base64') },
+  ]
+  const wrongType = {
+    ...original,
+    media: [{ ...first, mimeType: 'image/gif' }],
+  }
   const missing = { ...original, media: [] }
   const duplicate = { ...original, media: [first, first] }
   const extra = {
@@ -88,7 +94,14 @@ test('corrupt, missing, duplicated or extra backup media leave storage unchanged
   }
 
   const current = getCurrent(target)
-  for (const backup of [corrupt, missing, duplicate, extra, noncanonical]) {
+  for (const backup of [
+    corrupt,
+    wrongType,
+    missing,
+    duplicate,
+    extra,
+    noncanonical,
+  ]) {
     assert.throws(() =>
       restoreBackup(target, { backup, baseRevision: current.revision }),
     )
@@ -118,24 +131,55 @@ test('a failed revision write rolls back images imported by the same backup', t 
   assert.deepEqual(getCurrent(target), current)
 })
 
-test('restore rejects a stale base revision without replacing newer changes', t => {
+test('content limits also roll back images imported from a backup', t => {
   const source = createSource()
+  const target = openDatabase(':memory:')
   t.after(() => source.db.close())
+  t.after(() => target.close())
+  initializeContent(target)
+  const current = getCurrent(target)
   const backup = createBackup(source.db)
-  const newer = saveContent(source.db, {
-    content: source.saved.content,
-    baseRevision: source.saved.revision,
+  backup.content.blocks = Array.from({ length: 60 }, (_, index) => ({
+    title: '',
+    type: 'text',
+    visible: true,
+    id: `text-${index}`,
+    text: 'x'.repeat(20_000),
+  }))
+
+  assert.throws(
+    () => restoreBackup(target, { backup, baseRevision: current.revision }),
+    { statusCode: 413, code: 'CONTENT_TOO_LARGE' },
+  )
+  assert.deepEqual(listMedia(target), [])
+  assert.deepEqual(getCurrent(target), current)
+  assert.equal(listRevisions(target).length, 1)
+})
+
+test('a stale restore rolls back imported images and preserves newer changes', t => {
+  const source = createSource()
+  const target = openDatabase(':memory:')
+  t.after(() => source.db.close())
+  t.after(() => target.close())
+  initializeContent(target)
+  const backup = createBackup(source.db)
+  const current = getCurrent(target)
+  const newer = saveContent(target, {
+    content: current.content,
+    baseRevision: current.revision,
   })
 
   assert.throws(
     () =>
-      restoreBackup(source.db, {
+      restoreBackup(target, {
         backup,
-        baseRevision: source.saved.revision,
+        baseRevision: current.revision,
       }),
     { statusCode: 409 },
   )
-  assert.deepEqual(getCurrent(source.db), newer)
+  assert.deepEqual(getCurrent(target), newer)
+  assert.deepEqual(listMedia(target), [])
+  assert.equal(listRevisions(target).length, 2)
 })
 
 test('exporting an older revision includes its original images after current content changes', t => {

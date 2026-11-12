@@ -19,3 +19,8 @@ export const backupSchema = z.strictObject({
     }),
   ),
 })
+
+export const restoreBackupSchema = z.strictObject({
+  backup: backupSchema,
+  baseRevision: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+})

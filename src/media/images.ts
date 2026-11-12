@@ -7,7 +7,7 @@ function detectImageMime(data: Buffer): string | undefined {
     data.length >= 58 &&
     data.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex')) &&
     data.readUInt32BE(8) === 13 &&
-    data.toString('ascii', 12, 16) === 'IHDR' &&
+    data.toString('latin1', 12, 16) === 'IHDR' &&
     data.readUInt32BE(16) > 0 &&
     data.readUInt32BE(20) > 0 &&
     data.includes(Buffer.from('IDAT'), 33) &&
@@ -31,7 +31,7 @@ function detectImageMime(data: Buffer): string | undefined {
 
   if (
     data.length >= 26 &&
-    ['GIF87a', 'GIF89a'].includes(data.toString('ascii', 0, 6)) &&
+    ['GIF87a', 'GIF89a'].includes(data.toString('latin1', 0, 6)) &&
     data.readUInt16LE(6) > 0 &&
     data.readUInt16LE(8) > 0 &&
     data.subarray(13, -11).includes(0x2c) &&
@@ -42,10 +42,10 @@ function detectImageMime(data: Buffer): string | undefined {
 
   if (
     data.length >= 20 &&
-    data.toString('ascii', 0, 4) === 'RIFF' &&
+    data.toString('latin1', 0, 4) === 'RIFF' &&
     data.readUInt32LE(4) + 8 === data.length &&
-    data.toString('ascii', 8, 12) === 'WEBP' &&
-    ['VP8 ', 'VP8L', 'VP8X'].includes(data.toString('ascii', 12, 16)) &&
+    data.toString('latin1', 8, 12) === 'WEBP' &&
+    ['VP8 ', 'VP8L', 'VP8X'].includes(data.toString('latin1', 12, 16)) &&
     data.readUInt32LE(16) > 0 &&
     data.readUInt32LE(16) <= data.length - 20
   ) {

@@ -2,6 +2,8 @@ import assert from 'node:assert/strict'
 import { test, afterEach } from 'node:test'
 import type { DatabaseSync } from 'node:sqlite'
 
+import { ZodError } from 'zod'
+
 import { openDatabase } from '../src/storage/index.js'
 import type { SiteContent } from '../src/content/index.js'
 import {
@@ -52,6 +54,25 @@ test('initialization is idempotent and creates valid empty content', () => {
     siteContentSchema.parse(getCurrent(db).content),
     getCurrent(db).content,
   )
+})
+
+test('saving validates the complete input before changing content or history', () => {
+  const db = createDatabase()
+  const initial = getCurrent(db)
+
+  for (const input of [
+    null,
+    undefined,
+    { content: initial.content },
+    { baseRevision: initial.revision },
+    { baseRevision: '1', content: initial.content },
+    { extra: true, content: initial.content, baseRevision: initial.revision },
+  ]) {
+    assert.throws(() => saveContent(db, input), ZodError)
+  }
+
+  assert.deepEqual(getCurrent(db), initial)
+  assert.equal(listRevisions(db).length, 1)
 })
 
 test('validation rejects duplicate IDs, dangling references and invalid prices', () => {

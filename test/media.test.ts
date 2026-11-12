@@ -50,6 +50,20 @@ test('image signatures alone and truncated image data are rejected', () => {
   }
 })
 
+test('image signatures are compared without discarding high bits', () => {
+  const invalidPng = Buffer.from(png)
+  invalidPng[12] = 0xc9
+  const invalidGif = Buffer.from(gif)
+  invalidGif[0] = 0xc7
+
+  assert.throws(() => validateImage(invalidPng, 'image/png'), {
+    statusCode: 415,
+  })
+  assert.throws(() => validateImage(invalidGif, 'image/gif'), {
+    statusCode: 415,
+  })
+})
+
 test('uploading the same image preserves its identity and stored bytes', t => {
   const db = openDatabase(':memory:')
   t.after(() => db.close())
@@ -104,6 +118,19 @@ test('unreferenced images can be deleted and no longer read', t => {
   assert.deepEqual(listMedia(db), [])
   assert.throws(() => getMedia(db, image.id), AppError)
   assert.throws(() => deleteMedia(db, image.id), { statusCode: 404 })
+})
+
+test('ordinary text matching an image ID does not count as a media reference', t => {
+  const db = openDatabase(':memory:')
+  t.after(() => db.close())
+  const image = storeImage(db, png, 'image/png')
+  db.prepare('INSERT INTO revisions (created_at, document) VALUES (?, ?)').run(
+    new Date().toISOString(),
+    JSON.stringify({ imageId: null, title: image.id }),
+  )
+
+  deleteMedia(db, image.id)
+  assert.deepEqual(listMedia(db), [])
 })
 
 test('pagination rejects invalid values', t => {

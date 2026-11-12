@@ -3,8 +3,8 @@ import { createHash, randomBytes } from 'node:crypto'
 
 import { AppError } from '../errors/index.js'
 import { transaction } from '../storage/index.js'
-import { changePasswordSchema } from './schema.js'
 import { hashPassword, verifyPassword } from './password.js'
+import { loginSchema, changePasswordSchema } from './schema.js'
 import type { SessionRow, AuthSession, PasswordRow } from './types.js'
 
 const sessionDuration = 7 * 24 * 60 * 60 * 1000
@@ -32,7 +32,7 @@ export async function resetPassword(db: DatabaseSync): Promise<string> {
   const password = randomBytes(24).toString('base64url')
   const hash = await hashPassword(password)
 
-  replacePasswordAndRevokeSessions(db, hash)
+  transaction(db, () => replacePasswordAndRevokeSessions(db, hash))
   return password
 }
 
@@ -40,12 +40,10 @@ function replacePasswordAndRevokeSessions(
   db: DatabaseSync,
   hash: string,
 ): void {
-  transaction(db, () => {
-    db.prepare(
-      'INSERT INTO admin_password (id, hash) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET hash = excluded.hash',
-    ).run(hash)
-    db.prepare('DELETE FROM sessions').run()
-  })
+  db.prepare(
+    'INSERT INTO admin_password (id, hash) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET hash = excluded.hash',
+  ).run(hash)
+  db.prepare('DELETE FROM sessions').run()
 }
 
 function createSession(db: DatabaseSync): AuthSession {
@@ -87,8 +85,9 @@ export async function changePassword(
 
 export async function login(
   db: DatabaseSync,
-  password: string,
+  input: unknown,
 ): Promise<AuthSession> {
+  const { password } = loginSchema.parse(input)
   const hash = getPasswordHash(db)
 
   if (!hash) {
@@ -99,11 +98,7 @@ export async function login(
     )
   }
 
-  if (
-    password.length === 0 ||
-    password.length > 1024 ||
-    !(await verifyPassword(password, hash))
-  ) {
+  if (!(await verifyPassword(password, hash))) {
     throw invalidCredentials()
   }
 

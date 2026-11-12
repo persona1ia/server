@@ -13,11 +13,6 @@ export interface SavedContent extends RevisionSummary {
   content: SiteContent
 }
 
-export interface SaveContentInput {
-  content: unknown
-  baseRevision: number
-}
-
 export interface RevisionRow {
   id: number
   document: string

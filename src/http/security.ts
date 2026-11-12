@@ -62,9 +62,9 @@ export function requireAdmin(db: DatabaseSync, request: FastifyRequest) {
 // A global bucket bounds password hashing even behind a reverse proxy.
 export function rateLimit(capacity: number, refillMilliseconds: number) {
   let tokens = capacity
-  let updatedAt = Date.now()
+  let updatedAt = performance.now()
   return async (_request: FastifyRequest, reply: FastifyReply) => {
-    const now = Date.now()
+    const now = performance.now()
     tokens = Math.min(capacity, tokens + (now - updatedAt) / refillMilliseconds)
     updatedAt = now
     if (tokens < 1) {

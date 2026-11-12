@@ -43,10 +43,15 @@ export function storeImage(
 
   return transaction(db, () => {
     db.prepare(
-      `INSERT OR IGNORE INTO media (id, kind, mime_type, size, created_at, data)
-       VALUES (?, 'image', ?, ?, ?, ?)`,
+      `INSERT INTO media (id, kind, mime_type, size, created_at, data)
+       VALUES (?, 'image', ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING`,
     ).run(id, declaredMime, data.length, new Date().toISOString(), data)
-    return getMedia(db, id).item
+    const row = db
+      .prepare(
+        'SELECT id, kind, mime_type, size, created_at FROM media WHERE id = ?',
+      )
+      .get(id) as unknown as MediaRow
+    return toMediaItem(row)
   })
 }
 
@@ -85,7 +90,7 @@ export function deleteMedia(db: DatabaseSync, id: string): void {
     const reference = db
       .prepare(
         `SELECT 1 FROM revisions, json_tree(revisions.document) AS node
-         WHERE node.type = 'text' AND node.value = ? LIMIT 1`,
+         WHERE node.key = 'imageId' AND node.value = ? LIMIT 1`,
       )
       .get(id)
 
