@@ -1,0 +1,2 @@
+export const MAX_CONTENT_BYTES = 1024 * 1024
+export const MAX_CONTENT_MEDIA_BYTES = 32 * 1024 * 1024

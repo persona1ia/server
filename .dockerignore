@@ -3,6 +3,8 @@
 node_modules
 dist
 coverage
+data
+test
 *.log
 .env
 .env.*

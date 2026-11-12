@@ -1,15 +1,15 @@
 import { createHttpServer } from './http/index.js'
 
 const port = 3000
-const server = createHttpServer()
+const server = createHttpServer({ logger: true })
 
-server.listen(port, '0.0.0.0', () => {
-  console.info(`Server listening on port ${port}`)
-})
+process.once('SIGINT', () => void server.close())
+process.once('SIGTERM', () => void server.close())
 
-function shutdown() {
-  server.close()
+try {
+  await server.listen({ port, host: '0.0.0.0' })
+} catch (error) {
+  server.log.error(error)
+  await server.close()
+  process.exitCode = 1
 }
-
-process.once('SIGINT', shutdown)
-process.once('SIGTERM', shutdown)
