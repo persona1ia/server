@@ -11,6 +11,7 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/main.js",
     "typecheck": "tsc --noEmit",
+    "docs:lint": "redocly lint swagger/openapi.yml --lint-config error",
     "test": "tsx --test test/*.test.ts",
     "password:reset": "tsx src/auth/reset-password.ts",
     "lint": "eslint . --max-warnings 0",
@@ -23,6 +24,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.0",
+    "@redocly/cli": "2.77.0",
     "@types/node": "^24.19.2",
     "eslint": "^10.14.0",
     "eslint-config-prettier": "^10.1.8",

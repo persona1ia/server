@@ -11,6 +11,7 @@ import {
   logout,
   authenticate,
   resetPassword,
+  changePassword,
   isPasswordConfigured,
 } from '../src/auth/index.js'
 
@@ -121,4 +122,78 @@ test('a separate connection can reset the password without restarting the server
     authenticate(serverDb, (await login(serverDb, newPassword)).token),
     true,
   )
+})
+
+test('changing the password revokes every old session and preserves the chosen password exactly', async t => {
+  const db = openDatabase(':memory:')
+  t.after(() => db.close())
+  const oldPassword = await resetPassword(db)
+  const first = await login(db, oldPassword)
+  const second = await login(db, oldPassword)
+  const newPassword = '  chosen password with spaces  '
+
+  const session = await changePassword(db, {
+    newPassword,
+    currentPassword: oldPassword,
+  })
+
+  assert.equal(authenticate(db, first.token), false)
+  assert.equal(authenticate(db, second.token), false)
+  assert.equal(authenticate(db, session.token), true)
+  assert.ok(session.expiresAt > Date.now())
+  assert.equal(
+    db.prepare('SELECT COUNT(*) AS count FROM sessions').get()?.count,
+    1,
+  )
+  await assert.rejects(login(db, oldPassword), { statusCode: 401 })
+  await assert.rejects(login(db, newPassword.trim()), { statusCode: 401 })
+  assert.equal(authenticate(db, (await login(db, newPassword)).token), true)
+})
+
+test('an incorrect current password leaves the password and sessions unchanged', async t => {
+  const db = openDatabase(':memory:')
+  t.after(() => db.close())
+  const password = await resetPassword(db)
+  const session = await login(db, password)
+  const previousPassword = db.prepare('SELECT * FROM admin_password').get()
+  const previousSessions = db.prepare('SELECT * FROM sessions').all()
+
+  await assert.rejects(
+    changePassword(db, {
+      newPassword: 'chosen-new-password',
+      currentPassword: 'incorrect-password',
+    }),
+    { statusCode: 401 },
+  )
+
+  assert.deepEqual(
+    db.prepare('SELECT * FROM admin_password').get(),
+    previousPassword,
+  )
+  assert.deepEqual(db.prepare('SELECT * FROM sessions').all(), previousSessions)
+  assert.equal(authenticate(db, session.token), true)
+  assert.equal(authenticate(db, (await login(db, password)).token), true)
+})
+
+test('a concurrent password change is not overwritten and does not delete existing sessions', async t => {
+  const db = openDatabase(':memory:')
+  t.after(() => db.close())
+  const password = await resetPassword(db)
+  const session = await login(db, password)
+  const previousSessions = db.prepare('SELECT * FROM sessions').all()
+  const pendingChange = changePassword(db, {
+    currentPassword: password,
+    newPassword: 'pending-new-password',
+  })
+  db.prepare('UPDATE admin_password SET hash = ? WHERE id = 1').run(
+    'concurrent-change',
+  )
+
+  await assert.rejects(pendingChange, { statusCode: 409 })
+  assert.equal(
+    db.prepare('SELECT hash FROM admin_password WHERE id = 1').get()?.hash,
+    'concurrent-change',
+  )
+  assert.deepEqual(db.prepare('SELECT * FROM sessions').all(), previousSessions)
+  assert.equal(authenticate(db, session.token), true)
 })

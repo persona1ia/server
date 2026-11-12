@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="Техническая документация HTTP API Persona1ia: авторизация, контент, изображения, резервные копии и заказы."
+    />
+    <title>Persona1ia API — Swagger</title>
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5.34.1/swagger-ui.css"
+    />
+    <style>
+      body {
+        margin: 0;
+        background: #fafafa;
+      }
+
+      .notice {
+        max-width: 1460px;
+        margin: 0 auto;
+        padding: 20px;
+        box-sizing: border-box;
+        color: #3b4151;
+        font:
+          16px/1.5 system-ui,
+          sans-serif;
+      }
+
+      .notice p {
+        margin: 0 0 8px;
+      }
+    </style>
+  </head>
+  <body>
+    <header class="notice">
+      <p>
+        <a href="./openapi.yml" download>Скачать OpenAPI</a>
+      </p>
+      <p>
+        Эта страница служит справочником. Выполнение запросов отключено: API
+        использует cookie и принимает браузерные запросы только со своего
+        origin. Примеры и схемы предназначены для работы с вашим экземпляром
+        сервера.
+      </p>
+    </header>
+    <main id="swagger-ui" aria-label="Документация API"></main>
+    <noscript>
+      <p class="notice">
+        Для Swagger UI нужен JavaScript. Спецификацию можно скачать по ссылке
+        выше.
+      </p>
+    </noscript>
+    <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5.34.1/swagger-ui-bundle.js"></script>
+    <script>
+      SwaggerUIBundle({
+        url: './openapi.yml',
+        dom_id: '#swagger-ui',
+        deepLinking: true,
+        filter: true,
+        docExpansion: 'list',
+        defaultModelsExpandDepth: 0,
+        supportedSubmitMethods: [],
+        validatorUrl: null,
+      })
+    </script>
+  </body>
+</html>

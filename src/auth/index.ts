@@ -4,5 +4,6 @@ export {
   logout,
   authenticate,
   resetPassword,
+  changePassword,
   isPasswordConfigured,
 } from './service.js'

@@ -1,0 +1,7 @@
+extends:
+  - recommended-strict
+
+rules:
+  # Public GET /, /health, /api/site and /api/auth/session have no client errors.
+  # Do not invent 4xx responses solely to satisfy a documentation convention.
+  operation-4xx-response: off

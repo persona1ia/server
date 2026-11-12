@@ -3,6 +3,7 @@ import { createHash, randomBytes } from 'node:crypto'
 
 import { AppError } from '../errors/index.js'
 import { transaction } from '../storage/index.js'
+import { changePasswordSchema } from './schema.js'
 import { hashPassword, verifyPassword } from './password.js'
 import type { SessionRow, AuthSession, PasswordRow } from './types.js'
 
@@ -31,14 +32,57 @@ export async function resetPassword(db: DatabaseSync): Promise<string> {
   const password = randomBytes(24).toString('base64url')
   const hash = await hashPassword(password)
 
+  replacePasswordAndRevokeSessions(db, hash)
+  return password
+}
+
+function replacePasswordAndRevokeSessions(
+  db: DatabaseSync,
+  hash: string,
+): void {
   transaction(db, () => {
     db.prepare(
       'INSERT INTO admin_password (id, hash) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET hash = excluded.hash',
     ).run(hash)
     db.prepare('DELETE FROM sessions').run()
   })
+}
 
-  return password
+function createSession(db: DatabaseSync): AuthSession {
+  const now = Date.now()
+  const token = randomBytes(32).toString('base64url')
+  const expiresAt = now + sessionDuration
+
+  db.prepare('DELETE FROM sessions WHERE expires_at <= ?').run(now)
+  db.prepare('INSERT INTO sessions (token_hash, expires_at) VALUES (?, ?)').run(
+    hashToken(token),
+    expiresAt,
+  )
+  return { token, expiresAt }
+}
+
+export async function changePassword(
+  db: DatabaseSync,
+  input: unknown,
+): Promise<AuthSession> {
+  const { newPassword, currentPassword } = changePasswordSchema.parse(input)
+  const currentHash = getPasswordHash(db)
+  if (!currentHash || !(await verifyPassword(currentPassword, currentHash))) {
+    throw invalidCredentials()
+  }
+
+  const newHash = await hashPassword(newPassword)
+  return transaction(db, () => {
+    if (getPasswordHash(db) !== currentHash) {
+      throw new AppError(
+        409,
+        'password_changed',
+        'Пароль уже изменён. Войдите с актуальным паролем и повторите попытку.',
+      )
+    }
+    replacePasswordAndRevokeSessions(db, newHash)
+    return createSession(db)
+  })
 }
 
 export async function login(
@@ -63,23 +107,14 @@ export async function login(
     throw invalidCredentials()
   }
 
-  const now = Date.now()
-  const token = randomBytes(32).toString('base64url')
-  const expiresAt = now + sessionDuration
-
-  transaction(db, () => {
+  return transaction(db, () => {
     // A password reset can finish while the asynchronous scrypt call runs.
     if (getPasswordHash(db) !== hash) {
       throw invalidCredentials()
     }
 
-    db.prepare('DELETE FROM sessions WHERE expires_at <= ?').run(now)
-    db.prepare(
-      'INSERT INTO sessions (token_hash, expires_at) VALUES (?, ?)',
-    ).run(hashToken(token), expiresAt)
+    return createSession(db)
   })
-
-  return { token, expiresAt }
 }
 
 export function authenticate(

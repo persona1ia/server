@@ -1,0 +1,1515 @@
+openapi: 3.1.0
+info:
+  title: Persona1ia API
+  version: 0.0.0
+  license:
+    name: MIT
+    identifier: MIT
+  description: |
+    HTTP API лендинга и панели единственного владельца. Данные, изображения,
+    версии контента и тестовые заказы хранятся в SQLite.
+
+    ### Адрес и авторизация
+
+    Пути ниже отсчитываются от origin сервера API. Production-домен задаётся при
+    развёртывании; локальный сервер слушает `http://127.0.0.1:3000`.
+    GitHub Pages публикует только документацию, а не сервер API.
+
+    Вход устанавливает cookie `persona1ia_session` на 7 дней с `HttpOnly`,
+    `SameSite=Strict`, `Path=/` и `Secure` в production. Токен отсутствует в JSON.
+    Все `/api/admin/*` требуют действующий сеанс. Первоначальный пароль и сброс
+    забытого пароля выполняются командой `npm run password:reset` либо
+    `docker compose exec server node dist/auth/reset-password.js`.
+    Сброс и смена пароля завершают все прежние сеансы.
+
+    ### Браузерные запросы и CSRF
+
+    Лендинг, админка и API должны работать с одним origin; CORS не включён.
+    Для методов, кроме GET, HEAD и OPTIONS, сервер отклоняет
+    `Sec-Fetch-Site: cross-site`. Если есть `Origin`, его host должен совпадать
+    с `Host`, а протокол — с HTTPS в production или HTTP при локальной работе.
+    Отдельного CSRF-токена нет. Небраузерные клиенты могут не передавать Origin.
+    Swagger UI на Pages работает как справочник: отправка запросов отключена.
+
+    ### Форматы и лимиты
+
+    JSON-объекты запросов и контента не принимают неизвестные поля.
+    Поля обязательны, если явно не указано обратное. Текст отображается как
+    обычный текст, без интерпретации HTML. Даты — строки ISO 8601 в UTC.
+    Цена хранится целым числом минимальных единиц валюты, например копеек.
+
+    Обычное тело запроса ограничено 1 MiB (1048576 байт), загрузка изображения —
+    10 MiB, импорт резервной копии — 64 MiB. Сам документ контента ограничен
+    1 MiB, суммарные уникальные изображения одной версии — 32 MiB, включая
+    ссылки из скрытых элементов. Списки возвращают до 100 записей за запрос.
+    Все ответы имеют `X-Content-Type-Options: nosniff`,
+    `Referrer-Policy: no-referrer` и `Cache-Control: no-store`, кроме успешного
+    чтения изображений, для которого включено постоянное кеширование.
+
+    Сохранение или восстановление сразу публикует новую версию. Передавайте
+    текущий `revision` в `baseRevision`; при 409 `REVISION_CONFLICT` перечитайте
+    документ и согласуйте изменения. История автоматически не удаляется.
+
+    Ошибки имеют `{ error, message }`, а ошибки Zod дополнительно `issues`.
+    Регистр кодов ошибок значим. Ошибки разбора HTTP/JSON и превышения HTTP-лимита
+    могут иметь код `BAD_REQUEST` с соответствующим HTTP-статусом, включая
+    400, 413 и 415. Неизвестный маршрут возвращает 404 `NOT_FOUND`.
+servers:
+  - url: http://127.0.0.1:3000
+    description: Локальный сервер; для развёрнутого API используйте его origin
+security: []
+tags:
+  - name: System
+    description: Доступность сервера
+  - name: Site
+    description: Публичные данные лендинга
+  - name: Auth
+    description: Вход, сеанс и смена пароля владельца
+  - name: Content
+    description: Сохранение и схема полного документа
+  - name: Revisions
+    description: Неизменяемая история опубликованных версий
+  - name: Backups
+    description: Перенос контента вместе с используемыми изображениями
+  - name: Media
+    description: Загрузка, чтение и удаление изображений
+  - name: Orders
+    description: Тестовая покупка без списания денег
+paths:
+  /:
+    get:
+      operationId: getApiInfo
+      tags: [System]
+      summary: Проверить адрес API
+      description: Возвращает приветственное сообщение сервера.
+      responses:
+        '200':
+          description: API запущен
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [message]
+                properties:
+                  message:
+                    type: string
+                    const: Persona1ia API is running
+        default:
+          $ref: '#/components/responses/UnexpectedError'
+  /health:
+    get:
+      operationId: getHealth
+      tags: [System]
+      summary: Проверить сервер и подключение к SQLite
+      description: Выполняет SELECT 1 в базе данных перед успешным ответом.
+      responses:
+        '200':
+          description: Сервер и база доступны
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    const: ok
+        default:
+          $ref: '#/components/responses/UnexpectedError'
+  /api/site:
+    get:
+      operationId: getPublicSite
+      tags: [Site]
+      summary: Получить опубликованный лендинг
+      description: |
+        Возвращает текущую версию без скрытых курсов и блоков. Ссылки на скрытые
+        курсы удаляются из courseIds видимых блоков. Порядок блоков и ссылок
+        сохраняется; revision и savedAt относятся к полной сохранённой версии.
+      responses:
+        '200':
+          $ref: '#/components/responses/SavedContent'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
+  /api/auth/login:
+    post:
+      operationId: login
+      tags: [Auth]
+      summary: Войти по паролю владельца
+      description: |
+        Создаёт сеанс на 7 дней и устанавливает HttpOnly cookie. Старые сеансы
+        остаются действующими. Общий для всех клиентов лимит процесса:
+        до 5 запросов сразу, восстановление одной попытки каждые 12 секунд.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [password]
+              properties:
+                password:
+                  type: string
+                  format: password
+                  minLength: 1
+                  maxLength: 1024
+            example:
+              password: my-long-admin-password
+      responses:
+        '200':
+          $ref: '#/components/responses/Authenticated'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          description: Неверный пароль (invalid_credentials)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          $ref: '#/components/responses/CrossOriginRequest'
+        '413':
+          $ref: '#/components/responses/TooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          description: Пароль ещё не задан (password_not_configured); выполните команду сброса пароля
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
+  /api/auth/session:
+    get:
+      operationId: getSession
+      tags: [Auth]
+      summary: Проверить настройку пароля и текущий сеанс
+      description: |
+        Доступен без авторизации. При отсутствующей, истёкшей или недействительной
+        cookie возвращает authenticated=false, а не ошибку 401.
+      responses:
+        '200':
+          description: Состояние авторизации
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [passwordConfigured, authenticated]
+                properties:
+                  passwordConfigured:
+                    type: boolean
+                  authenticated:
+                    type: boolean
+              example:
+                passwordConfigured: true
+                authenticated: false
+        default:
+          $ref: '#/components/responses/UnexpectedError'
+  /api/auth/logout:
+    post:
+      operationId: logout
+      tags: [Auth]
+      summary: Завершить текущий сеанс
+      description: |
+        Удаляет текущий сеанс и очищает cookie. Возвращает 204 и при отсутствии
+        действующего сеанса. Другие сеансы остаются действующими. Тело не требуется.
+      responses:
+        '204':
+          description: Сеанс завершён; тело ответа отсутствует
+          headers:
+            Set-Cookie:
+              description: Очистка persona1ia_session с Path=/, HttpOnly и SameSite=Strict
+              schema:
+                type: string
+        '403':
+          $ref: '#/components/responses/CrossOriginRequest'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
+  /api/admin/password:
+    put:
+      operationId: changePassword
+      tags: [Auth]
+      summary: Сменить пароль владельца
+      security:
+        - sessionCookie: []
+      description: |
+        Требует действующего сеанса и текущего пароля. Новый пароль — 12–1024
+        символа, без обязательных сочетаний букв, цифр или спецсимволов.
+        Все прежние сеансы отзываются; ответ устанавливает новую cookie текущему
+        клиенту. Если пароль изменился параллельно, возвращается 409.
+        Лимит отдельный от входа: 5 запросов сразу, одна попытка каждые 12 секунд
+        на весь процесс сервера.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [currentPassword, newPassword]
+              properties:
+                currentPassword:
+                  type: string
+                  format: password
+                  minLength: 1
+                  maxLength: 1024
+                newPassword:
+                  type: string
+                  format: password
+                  minLength: 12
+                  maxLength: 1024
+      responses:
+        '200':
+          $ref: '#/components/responses/Authenticated'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          description: Нет действующего сеанса (UNAUTHORIZED) или неверен текущий пароль (invalid_credentials)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          $ref: '#/components/responses/CrossOriginRequest'
+        '409':
+          description: Пароль уже изменён другим запросом (password_changed); войдите с актуальным паролем
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '413':
+          $ref: '#/components/responses/TooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
+  /api/admin/content:
+    get:
+      operationId: getContent
+      tags: [Content]
+      summary: Получить полный текущий документ
+      security:
+        - sessionCookie: []
+      description: Включает скрытые блоки и курсы. Используйте revision как baseRevision при изменении.
+      responses:
+        '200':
+          $ref: '#/components/responses/SavedContent'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
+    put:
+      operationId: saveContent
+      tags: [Content]
+      summary: Сохранить и опубликовать полный документ
+      security:
+        - sessionCookie: []
+      description: |
+        Полностью заменяет текущий документ и создаёт новую запись истории.
+        Требует актуальный baseRevision. Все imageId должны существовать;
+        одинаковые изображения учитываются в лимите 32 MiB только один раз.
+        HTTP-тело целиком, включая обёртку, ограничено 1 MiB.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [baseRevision, content]
+              properties:
+                baseRevision:
+                  $ref: '#/components/schemas/RevisionId'
+                content:
+                  $ref: '#/components/schemas/SiteContent'
+      responses:
+        '200':
+          $ref: '#/components/responses/SavedContent'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/CrossOriginRequest'
+        '409':
+          $ref: '#/components/responses/RevisionConflict'
+        '413':
+          $ref: '#/components/responses/TooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
+  /api/admin/content/schema:
+    get:
+      operationId: getContentSchema
+      tags: [Content]
+      summary: Получить JSON Schema документа
+      security:
+        - sessionCookie: []
+      description: |
+        JSON Schema, построенная из актуальной Zod-схемы сервера, для редактора
+        контента. Пользовательские проверки связей, уникальности идентификаторов,
+        допустимых ссылок и наличия изображений полностью выполняются сервером;
+        JSON Schema не заменяет серверную валидацию.
+      responses:
+        '200':
+          description: JSON Schema документа контента
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
+  /api/admin/revisions:
+    get:
+      operationId: listRevisions
+      tags: [Revisions]
+      summary: Получить историю версий
+      security:
+        - sessionCookie: []
+      description: |
+        Версии идут по убыванию revision. Для следующей страницы передайте
+        revision последнего элемента как before. Дополнительные query-поля
+        отклоняются. Пустой массив означает конец списка.
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - name: before
+          in: query
+          description: Вернуть только версии со строго меньшим revision
+          schema:
+            $ref: '#/components/schemas/RevisionId'
+      responses:
+        '200':
+          description: История без содержимого документов
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [revisions]
+                properties:
+                  revisions:
+                    type: array
+                    maxItems: 100
+                    items:
+                      $ref: '#/components/schemas/RevisionSummary'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
+  /api/admin/revisions/{id}:
+    parameters:
+      - $ref: '#/components/parameters/RevisionId'
+    get:
+      operationId: getRevision
+      tags: [Revisions]
+      summary: Получить документ выбранной версии
+      security:
+        - sessionCookie: []
+      description: Возвращает полный исторический документ, включая скрытые элементы.
+      responses:
+        '200':
+          $ref: '#/components/responses/SavedContent'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/RevisionNotFound'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
+  /api/admin/revisions/{id}/restore:
+    parameters:
+      - $ref: '#/components/parameters/RevisionId'
+    post:
+      operationId: restoreRevision
+      tags: [Revisions]
+      summary: Опубликовать содержимое старой версии
+      security:
+        - sessionCookie: []
+      description: |
+        Создаёт новую версию с содержимым выбранной; старые версии остаются
+        неизменными. baseRevision относится к текущей версии, а не к выбранной.
+      requestBody:
+        $ref: '#/components/requestBodies/BaseRevision'
+      responses:
+        '200':
+          $ref: '#/components/responses/SavedContent'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/CrossOriginRequest'
+        '404':
+          $ref: '#/components/responses/RevisionNotFound'
+        '409':
+          $ref: '#/components/responses/RevisionConflict'
+        '413':
+          $ref: '#/components/responses/TooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
+  /api/admin/backups/current:
+    get:
+      operationId: exportCurrentBackup
+      tags: [Backups]
+      summary: Скачать резервную копию текущей версии
+      security:
+        - sessionCookie: []
+      description: |
+        Экспортирует документ и все изображения, на которые он ссылается,
+        включая скрытые элементы. Пароль, сеансы, заказы, остальные версии
+        и неиспользуемые изображения в копию не входят.
+      responses:
+        '200':
+          $ref: '#/components/responses/Backup'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
+  /api/admin/backups/{id}:
+    parameters:
+      - $ref: '#/components/parameters/RevisionId'
+    get:
+      operationId: exportRevisionBackup
+      tags: [Backups]
+      summary: Скачать резервную копию выбранной версии
+      security:
+        - sessionCookie: []
+      description: |
+        Экспортирует полный документ выбранной версии и используемые им
+        изображения. Формат совпадает с копией текущей версии.
+      responses:
+        '200':
+          $ref: '#/components/responses/Backup'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/RevisionNotFound'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
+  /api/admin/backups/restore:
+    post:
+      operationId: restoreBackup
+      tags: [Backups]
+      summary: Импортировать копию и опубликовать новую версию
+      security:
+        - sessionCookie: []
+      description: |
+        Атомарно импортирует изображения и создаёт новую версию. HTTP-тело
+        ограничено 64 MiB; вложенный контент — 1 MiB; декодированные уникальные
+        изображения — 32 MiB суммарно и 10 MiB каждое. Набор media должен точно
+        совпадать со ссылками контента, без пропусков, дублей и лишних файлов.
+        Проверяются канонический base64, SHA-256, сигнатура и MIME каждого файла.
+        При любой ошибке изменения не сохраняются.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [baseRevision, backup]
+              properties:
+                baseRevision:
+                  $ref: '#/components/schemas/RevisionId'
+                backup:
+                  $ref: '#/components/schemas/Backup'
+      responses:
+        '200':
+          $ref: '#/components/responses/SavedContent'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/CrossOriginRequest'
+        '409':
+          $ref: '#/components/responses/RevisionConflict'
+        '413':
+          $ref: '#/components/responses/TooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
+  /api/media/{id}:
+    parameters:
+      - $ref: '#/components/parameters/MediaId'
+    get:
+      operationId: getMedia
+      tags: [Media]
+      summary: Скачать изображение по SHA-256
+      description: |
+        Публичный доступ по идентификатору, независимо от видимости блоков.
+        Возвращает исходные байты. Точное совпадение If-None-Match с ETag
+        (идентификатор в двойных кавычках) даёт 304 без тела; списки тегов
+        и слабые ETag специально не обрабатываются.
+      parameters:
+        - name: If-None-Match
+          in: header
+          description: ETag из предыдущего ответа, включая двойные кавычки
+          schema:
+            type: string
+          example: '"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"'
+      responses:
+        '200':
+          description: Исходные байты изображения
+          headers:
+            ETag:
+              $ref: '#/components/headers/ETag'
+            Cache-Control:
+              $ref: '#/components/headers/MediaCacheControl'
+          content:
+            image/png:
+              schema:
+                $ref: '#/components/schemas/BinaryImage'
+            image/jpeg:
+              schema:
+                $ref: '#/components/schemas/BinaryImage'
+            image/gif:
+              schema:
+                $ref: '#/components/schemas/BinaryImage'
+            image/webp:
+              schema:
+                $ref: '#/components/schemas/BinaryImage'
+        '304':
+          description: Изображение не изменилось; тело отсутствует
+          headers:
+            ETag:
+              $ref: '#/components/headers/ETag'
+            Cache-Control:
+              $ref: '#/components/headers/MediaCacheControl'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/MediaNotFound'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
+  /api/admin/media:
+    get:
+      operationId: listMedia
+      tags: [Media]
+      summary: Получить список загруженных изображений
+      security:
+        - sessionCookie: []
+      description: |
+        Сортировка по createdAt, затем id по убыванию. Включает неиспользуемые
+        изображения. Дополнительные query-поля отклоняются; общего счётчика нет.
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: Метаданные изображений
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [media]
+                properties:
+                  media:
+                    type: array
+                    maxItems: 100
+                    items:
+                      $ref: '#/components/schemas/MediaItem'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
+    post:
+      operationId: uploadMedia
+      tags: [Media]
+      summary: Загрузить изображение бинарным телом
+      security:
+        - sessionCookie: []
+      description: |
+        Передайте байты файла, не multipart/form-data и не JSON. Content-Type
+        должен совпадать с распознанным форматом. Допустимы PNG, JPEG, GIF, WebP
+        до 10 MiB; SVG и видео не принимаются. Проверяются сигнатура и базовая
+        структура, без полного декодирования. SHA-256 содержимого становится id.
+        Повторная загрузка тех же байтов возвращает существующее изображение
+        с прежним createdAt, также со статусом 201.
+      requestBody:
+        required: true
+        content:
+          image/png:
+            schema:
+              $ref: '#/components/schemas/BinaryImage'
+          image/jpeg:
+            schema:
+              $ref: '#/components/schemas/BinaryImage'
+          image/gif:
+            schema:
+              $ref: '#/components/schemas/BinaryImage'
+          image/webp:
+            schema:
+              $ref: '#/components/schemas/BinaryImage'
+      responses:
+        '201':
+          description: Изображение сохранено или уже существовало
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MediaItem'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/CrossOriginRequest'
+        '413':
+          $ref: '#/components/responses/TooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
+  /api/admin/media/{id}:
+    parameters:
+      - $ref: '#/components/parameters/MediaId'
+    delete:
+      operationId: deleteMedia
+      tags: [Media]
+      summary: Удалить неиспользуемое изображение
+      security:
+        - sessionCookie: []
+      description: |
+        Удаление запрещено, если идентификатор встречается как строковое значение
+        хотя бы в одной сохранённой версии, включая старые и скрытые элементы.
+        Тело запроса не требуется.
+      responses:
+        '204':
+          description: Изображение удалено; тело отсутствует
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/CrossOriginRequest'
+        '404':
+          $ref: '#/components/responses/MediaNotFound'
+        '409':
+          description: Изображение используется сохранённой версией (MEDIA_IN_USE)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
+  /api/checkout:
+    post:
+      operationId: simulateCheckout
+      tags: [Orders]
+      summary: Создать тестовый оплаченный заказ
+      description: |
+        Реальные деньги не списываются; данные покупателя и карты не принимаются.
+        Доступны только существующие видимые курсы. Название, цена и валюта
+        копируются из опубликованного курса и после создания не меняются.
+        Повтор с тем же Idempotency-Key и courseId возвращает прежний заказ
+        со статусом 201, даже если курс после этого скрыли или изменили.
+        Тот же ключ с другим курсом возвращает 409. Лимит общий для процесса:
+        30 запросов сразу, восстановление одного запроса каждые 2 секунды.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          description: Уникальный UUID операции; сохраняйте его при повторе запроса
+          schema:
+            type: string
+            format: uuid
+          example: 6cad073c-9385-4ab4-bcc1-81d790633f6f
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [courseId]
+              properties:
+                courseId:
+                  type: string
+                  minLength: 1
+                  maxLength: 100
+            example:
+              courseId: intro
+      responses:
+        '201':
+          description: Созданный или ранее созданный тестовый заказ
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [order, simulation]
+                properties:
+                  order:
+                    $ref: '#/components/schemas/Order'
+                  simulation:
+                    type: boolean
+                    const: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/CrossOriginRequest'
+        '404':
+          description: Курс отсутствует или скрыт (COURSE_NOT_FOUND)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Ключ уже использован для другого курса (IDEMPOTENCY_CONFLICT)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '413':
+          $ref: '#/components/responses/TooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
+  /api/admin/orders:
+    get:
+      operationId: listOrders
+      tags: [Orders]
+      summary: Получить список тестовых заказов
+      security:
+        - sessionCookie: []
+      description: |
+        Заказы идут в обратном порядке создания. Дополнительные query-поля
+        отклоняются; общего счётчика нет. Пустой массив означает конец списка.
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: Список заказов
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [orders]
+                properties:
+                  orders:
+                    type: array
+                    maxItems: 100
+                    items:
+                      $ref: '#/components/schemas/Order'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
+components:
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: persona1ia_session
+      description: |
+        HttpOnly cookie, выдаваемая POST /api/auth/login или PUT /api/admin/password.
+        Срок 7 дней, SameSite=Strict, Path=/, Secure в production. Браузер
+        передаёт её автоматически при запросах к тому же origin.
+  parameters:
+    RevisionId:
+      name: id
+      in: path
+      required: true
+      description: Числовой идентификатор сохранённой версии
+      schema:
+        $ref: '#/components/schemas/RevisionId'
+    MediaId:
+      name: id
+      in: path
+      required: true
+      description: SHA-256 байтов изображения, 64 строчные шестнадцатеричные цифры
+      schema:
+        $ref: '#/components/schemas/MediaId'
+    Limit:
+      name: limit
+      in: query
+      description: Максимальное число записей в ответе
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 50
+    Offset:
+      name: offset
+      in: query
+      description: Число записей, пропускаемых с начала списка
+      schema:
+        type: integer
+        minimum: 0
+        maximum: 9007199254740991
+        default: 0
+  headers:
+    ETag:
+      description: SHA-256 изображения в двойных кавычках
+      schema:
+        type: string
+        pattern: '^"[a-f0-9]{64}"$'
+    MediaCacheControl:
+      description: Неизменяемое содержимое можно кешировать один год
+      schema:
+        type: string
+        const: public, max-age=31536000, immutable
+  requestBodies:
+    BaseRevision:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [baseRevision]
+            properties:
+              baseRevision:
+                $ref: '#/components/schemas/RevisionId'
+          example:
+            baseRevision: 1
+  responses:
+    Authenticated:
+      description: Новый сеанс создан
+      headers:
+        Set-Cookie:
+          description: persona1ia_session с HttpOnly, SameSite=Strict, Path=/, Expires и Secure в production
+          schema:
+            type: string
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [authenticated, expiresAt]
+            properties:
+              authenticated:
+                type: boolean
+                const: true
+              expiresAt:
+                type: string
+                format: date-time
+    SavedContent:
+      description: Документ с идентификатором и временем сохранения версии
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/SavedContent'
+          example:
+            revision: 1
+            savedAt: '2026-11-12T10:00:00.000Z'
+            content:
+              schemaVersion: 1
+              site:
+                title: Имя эксперта
+                description: Практические курсы
+                contacts:
+                  email: expert@example.com
+                  phone: ''
+                  address: ''
+                  links: []
+              courses:
+                - id: intro
+                  title: Вводный курс
+                  description: Описание курса
+                  priceMinor: 99000
+                  currency: RUB
+                  imageId: null
+                  visible: true
+              blocks:
+                - id: welcome
+                  type: hero
+                  title: Учимся вместе
+                  text: Знакомство с автором
+                  visible: true
+                  imageId: null
+                  action:
+                    label: Смотреть курсы
+                    url: '#courses'
+                - id: courses
+                  type: courses
+                  title: Курсы
+                  visible: true
+                  courseIds: [intro]
+    Backup:
+      description: Переносимая JSON-копия одного документа и его изображений
+      headers:
+        Content-Disposition:
+          description: Имя скачиваемого файла содержит номер экспортированной версии
+          schema:
+            type: string
+          example: attachment; filename="persona1ia-revision-1.json"
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Backup'
+    BadRequest:
+      description: |
+        Недопустимые данные (VALIDATION_ERROR с issues), некорректный JSON
+        (BAD_REQUEST), несуществующее изображение в контенте (MEDIA_NOT_FOUND)
+        или некорректная резервная копия (INVALID_BACKUP).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: VALIDATION_ERROR
+            message: Проверьте переданные данные.
+            issues:
+              - path: [baseRevision]
+                message: Invalid input
+    Unauthorized:
+      description: Нет действующего административного сеанса (UNAUTHORIZED)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: UNAUTHORIZED
+            message: Необходим вход администратора.
+    CrossOriginRequest:
+      description: Запрос отклонён защитой от другого origin (CROSS_ORIGIN_REQUEST)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    RevisionConflict:
+      description: baseRevision устарел (REVISION_CONFLICT); перечитайте текущий документ
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    RevisionNotFound:
+      description: Версия не существует (REVISION_NOT_FOUND)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    MediaNotFound:
+      description: Изображение не существует (MEDIA_NOT_FOUND)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    TooLarge:
+      description: |
+        Превышен размер HTTP-тела (BAD_REQUEST), документа (CONTENT_TOO_LARGE),
+        изображения (IMAGE_TOO_LARGE) или всех изображений версии
+        (CONTENT_MEDIA_TOO_LARGE). Лимит зависит от операции.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    UnsupportedMediaType:
+      description: |
+        Неподдерживаемый Content-Type (BAD_REQUEST), небинарное тело загрузки
+        (UNSUPPORTED_MEDIA_TYPE) или неверное изображение/MIME (INVALID_IMAGE).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    RateLimited:
+      description: Исчерпан общий лимит запросов операции (RATE_LIMITED)
+      headers:
+        Retry-After:
+          description: Через сколько секунд можно повторить запрос
+          schema:
+            type: integer
+            minimum: 1
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    UnexpectedError:
+      description: |
+        Ошибка сервера (обычно 500 INTERNAL_ERROR) либо другая HTTP-ошибка
+        в общем формате. Для неизвестного маршрута — 404 NOT_FOUND.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+  schemas:
+    Error:
+      type: object
+      additionalProperties: false
+      required: [error, message]
+      properties:
+        error:
+          type: string
+          description: Машинный код; регистр значим
+        message:
+          type: string
+          description: Описание для человека; язык может зависеть от источника ошибки
+        issues:
+          type: array
+          description: Только для VALIDATION_ERROR
+          items:
+            type: object
+            additionalProperties: false
+            required: [path, message]
+            properties:
+              path:
+                type: array
+                items:
+                  oneOf:
+                    - type: string
+                    - type: integer
+              message:
+                type: string
+    RevisionId:
+      type: integer
+      minimum: 1
+      maximum: 9007199254740991
+      description: Положительное безопасное целое число JavaScript
+      examples: [1]
+    ContentId:
+      type: string
+      pattern: '^[a-zA-Z0-9][a-zA-Z0-9_-]{0,99}$'
+      description: 1–100 латинских букв, цифр, _ или -; первый символ — буква либо цифра
+      examples: [intro]
+    MediaId:
+      type: string
+      pattern: '^[a-f0-9]{64}$'
+      description: SHA-256 исходных байтов изображения
+    NullableMediaId:
+      oneOf:
+        - $ref: '#/components/schemas/MediaId'
+        - type: 'null'
+      description: Идентификатор изображения либо null при его отсутствии
+    Title:
+      type: string
+      maxLength: 200
+      description: Обычный текст; пустая строка допустима, если не указано иное
+    Text:
+      type: string
+      maxLength: 20000
+      description: Обычный текст, не HTML
+    Link:
+      type: object
+      additionalProperties: false
+      required: [label, url]
+      properties:
+        label:
+          type: string
+          minLength: 1
+          maxLength: 200
+        url:
+          type: string
+          maxLength: 2048
+          description: |
+            HTTP(S)-адрес, путь с / (но не //) или непустой якорь с #.
+            Пробельные/управляющие символы U+0000–U+0020, U+007F и обратная
+            косая черта запрещены. Допустимость проверяется сервером.
+          examples: ['https://example.com', '/courses', '#courses']
+    SiteContent:
+      type: object
+      additionalProperties: false
+      required: [schemaVersion, site, courses, blocks]
+      description: |
+        Полный документ лендинга. id курсов уникальны внутри courses, id блоков —
+        внутри blocks. Ссылки courseIds должны существовать и не повторяться
+        в пределах блока. Все ненулевые imageId должны быть загружены на сервер.
+        Порядок blocks определяет порядок отображения.
+      properties:
+        schemaVersion:
+          type: integer
+          const: 1
+        site:
+          type: object
+          additionalProperties: false
+          required: [title, description, contacts]
+          properties:
+            title:
+              $ref: '#/components/schemas/Title'
+            description:
+              type: string
+              maxLength: 2000
+            contacts:
+              type: object
+              additionalProperties: false
+              required: [email, phone, address, links]
+              properties:
+                email:
+                  oneOf:
+                    - type: string
+                      const: ''
+                    - type: string
+                      format: email
+                      maxLength: 254
+                phone:
+                  type: string
+                  maxLength: 100
+                address:
+                  type: string
+                  maxLength: 1000
+                links:
+                  type: array
+                  maxItems: 50
+                  items:
+                    $ref: '#/components/schemas/Link'
+        courses:
+          type: array
+          maxItems: 500
+          items:
+            $ref: '#/components/schemas/Course'
+        blocks:
+          type: array
+          maxItems: 200
+          items:
+            $ref: '#/components/schemas/Block'
+    Course:
+      type: object
+      additionalProperties: false
+      required: [id, title, description, priceMinor, currency, imageId, visible]
+      properties:
+        id:
+          $ref: '#/components/schemas/ContentId'
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        description:
+          $ref: '#/components/schemas/Text'
+        priceMinor:
+          type: integer
+          minimum: 0
+          maximum: 9007199254740991
+          description: Стоимость в минимальных единицах валюты
+          examples: [99000]
+        currency:
+          type: string
+          pattern: '^[A-Z]{3}$'
+          description: Три заглавные латинские буквы; сервер не проверяет справочник валют
+          examples: [RUB]
+        imageId:
+          $ref: '#/components/schemas/NullableMediaId'
+        visible:
+          type: boolean
+    Block:
+      oneOf:
+        - $ref: '#/components/schemas/HeroBlock'
+        - $ref: '#/components/schemas/AboutBlock'
+        - $ref: '#/components/schemas/TextBlock'
+        - $ref: '#/components/schemas/CoursesBlock'
+        - $ref: '#/components/schemas/GalleryBlock'
+        - $ref: '#/components/schemas/TestimonialsBlock'
+        - $ref: '#/components/schemas/FaqBlock'
+        - $ref: '#/components/schemas/ContactsBlock'
+      discriminator:
+        propertyName: type
+        mapping:
+          hero: '#/components/schemas/HeroBlock'
+          about: '#/components/schemas/AboutBlock'
+          text: '#/components/schemas/TextBlock'
+          courses: '#/components/schemas/CoursesBlock'
+          gallery: '#/components/schemas/GalleryBlock'
+          testimonials: '#/components/schemas/TestimonialsBlock'
+          faq: '#/components/schemas/FaqBlock'
+          contacts: '#/components/schemas/ContactsBlock'
+    BlockBase:
+      type: object
+      required: [id, title, visible]
+      properties:
+        id:
+          $ref: '#/components/schemas/ContentId'
+        title:
+          $ref: '#/components/schemas/Title'
+        visible:
+          type: boolean
+    HeroBlock:
+      type: object
+      unevaluatedProperties: false
+      allOf:
+        - $ref: '#/components/schemas/BlockBase'
+        - type: object
+          required: [type, text, imageId, action]
+          properties:
+            type:
+              type: string
+              const: hero
+            text:
+              $ref: '#/components/schemas/Text'
+            imageId:
+              $ref: '#/components/schemas/NullableMediaId'
+            action:
+              oneOf:
+                - $ref: '#/components/schemas/Link'
+                - type: 'null'
+    AboutBlock:
+      type: object
+      unevaluatedProperties: false
+      allOf:
+        - $ref: '#/components/schemas/BlockBase'
+        - type: object
+          required: [type, text, imageId]
+          properties:
+            type:
+              type: string
+              const: about
+            text:
+              $ref: '#/components/schemas/Text'
+            imageId:
+              $ref: '#/components/schemas/NullableMediaId'
+    TextBlock:
+      type: object
+      unevaluatedProperties: false
+      allOf:
+        - $ref: '#/components/schemas/BlockBase'
+        - type: object
+          required: [type, text]
+          properties:
+            type:
+              type: string
+              const: text
+            text:
+              $ref: '#/components/schemas/Text'
+    CoursesBlock:
+      type: object
+      unevaluatedProperties: false
+      allOf:
+        - $ref: '#/components/schemas/BlockBase'
+        - type: object
+          required: [type, courseIds]
+          properties:
+            type:
+              type: string
+              const: courses
+            courseIds:
+              type: array
+              maxItems: 500
+              uniqueItems: true
+              description: Упорядоченные ссылки на существующие курсы
+              items:
+                $ref: '#/components/schemas/ContentId'
+    GalleryBlock:
+      type: object
+      unevaluatedProperties: false
+      allOf:
+        - $ref: '#/components/schemas/BlockBase'
+        - type: object
+          required: [type, images]
+          properties:
+            type:
+              type: string
+              const: gallery
+            images:
+              type: array
+              maxItems: 200
+              items:
+                type: object
+                additionalProperties: false
+                required: [imageId, alt]
+                properties:
+                  imageId:
+                    $ref: '#/components/schemas/MediaId'
+                  alt:
+                    $ref: '#/components/schemas/Title'
+    TestimonialsBlock:
+      type: object
+      unevaluatedProperties: false
+      allOf:
+        - $ref: '#/components/schemas/BlockBase'
+        - type: object
+          required: [type, items]
+          properties:
+            type:
+              type: string
+              const: testimonials
+            items:
+              type: array
+              maxItems: 200
+              items:
+                type: object
+                additionalProperties: false
+                required: [author, text, imageId]
+                properties:
+                  author:
+                    type: string
+                    minLength: 1
+                    maxLength: 200
+                  text:
+                    $ref: '#/components/schemas/Text'
+                  imageId:
+                    $ref: '#/components/schemas/NullableMediaId'
+    FaqBlock:
+      type: object
+      unevaluatedProperties: false
+      allOf:
+        - $ref: '#/components/schemas/BlockBase'
+        - type: object
+          required: [type, items]
+          properties:
+            type:
+              type: string
+              const: faq
+            items:
+              type: array
+              maxItems: 200
+              items:
+                type: object
+                additionalProperties: false
+                required: [question, answer]
+                properties:
+                  question:
+                    type: string
+                    minLength: 1
+                    maxLength: 200
+                  answer:
+                    $ref: '#/components/schemas/Text'
+    ContactsBlock:
+      type: object
+      unevaluatedProperties: false
+      description: Контактные данные берутся из site.contacts
+      allOf:
+        - $ref: '#/components/schemas/BlockBase'
+        - type: object
+          required: [type, text]
+          properties:
+            type:
+              type: string
+              const: contacts
+            text:
+              $ref: '#/components/schemas/Text'
+    RevisionSummary:
+      type: object
+      additionalProperties: false
+      required: [revision, savedAt]
+      properties:
+        revision:
+          $ref: '#/components/schemas/RevisionId'
+        savedAt:
+          type: string
+          format: date-time
+    SavedContent:
+      type: object
+      additionalProperties: false
+      required: [revision, savedAt, content]
+      properties:
+        revision:
+          $ref: '#/components/schemas/RevisionId'
+        savedAt:
+          type: string
+          format: date-time
+        content:
+          $ref: '#/components/schemas/SiteContent'
+    ImageMimeType:
+      type: string
+      enum: [image/png, image/jpeg, image/gif, image/webp]
+    BinaryImage:
+      type: string
+      format: binary
+      description: Исходные байты PNG, JPEG, GIF или WebP, максимум 10485760 байт
+    MediaItem:
+      type: object
+      additionalProperties: false
+      required: [id, kind, mimeType, size, createdAt, url]
+      properties:
+        id:
+          $ref: '#/components/schemas/MediaId'
+        kind:
+          type: string
+          const: image
+        mimeType:
+          $ref: '#/components/schemas/ImageMimeType'
+        size:
+          type: integer
+          minimum: 1
+          maximum: 10485760
+          description: Размер исходных байтов
+        createdAt:
+          type: string
+          format: date-time
+        url:
+          type: string
+          pattern: '^/api/media/[a-f0-9]{64}$'
+          description: Путь изображения относительно origin API
+    Backup:
+      type: object
+      additionalProperties: false
+      required: [format, version, exportedAt, content, media]
+      properties:
+        format:
+          type: string
+          const: persona1ia-backup
+        version:
+          type: integer
+          const: 1
+        exportedAt:
+          type: string
+          format: date-time
+          description: Время экспорта в UTC с суффиксом Z
+        content:
+          $ref: '#/components/schemas/SiteContent'
+        media:
+          type: array
+          description: Все и только изображения из ссылок content, каждое ровно один раз
+          items:
+            type: object
+            additionalProperties: false
+            required: [id, mimeType, dataBase64]
+            properties:
+              id:
+                $ref: '#/components/schemas/MediaId'
+              mimeType:
+                $ref: '#/components/schemas/ImageMimeType'
+              dataBase64:
+                type: string
+                contentEncoding: base64
+                minLength: 1
+                maxLength: 13981016
+                description: Канонический base64 исходных байтов; SHA-256 должен совпадать с id
+    Order:
+      type: object
+      additionalProperties: false
+      required:
+        [id, courseId, courseTitle, priceMinor, currency, status, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        courseId:
+          $ref: '#/components/schemas/ContentId'
+        courseTitle:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: Название на момент заказа
+        priceMinor:
+          type: integer
+          minimum: 0
+          maximum: 9007199254740991
+          description: Цена в минимальных единицах валюты на момент заказа
+        currency:
+          type: string
+          pattern: '^[A-Z]{3}$'
+        status:
+          type: string
+          const: simulated_paid
+        createdAt:
+          type: string
+          format: date-time

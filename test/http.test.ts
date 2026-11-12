@@ -537,3 +537,156 @@ test('checkout is an idempotent simulation using server prices and rejecting pay
   assert.equal(orders.statusCode, 200)
   assert.equal(orders.json().orders.length, 2)
 })
+
+test('changing the password rotates the cookie and invalidates all old browser sessions', async t => {
+  for (const secureCookies of [false, true]) {
+    const { app, password } = await fixture(t, secureCookies)
+    const firstCookie = await signIn(app, password)
+    const secondCookie = await signIn(app, password)
+    const newPassword = 'new-password'
+    const changed = await app.inject({
+      method: 'PUT',
+      url: '/api/admin/password',
+      payload: { newPassword, currentPassword: password },
+      headers: {
+        cookie: firstCookie,
+        host: 'site.example',
+        origin: `${secureCookies ? 'https' : 'http'}://site.example`,
+      },
+    })
+
+    assert.equal(changed.statusCode, 200, changed.body)
+    assert.equal(changed.json().authenticated, true)
+    assert.ok(Date.parse(changed.json().expiresAt) > Date.now())
+    const setCookie = changed.headers['set-cookie']
+    assert.equal(typeof setCookie, 'string')
+    assert.match(String(setCookie), /; HttpOnly/)
+    assert.match(String(setCookie), /; SameSite=Strict/i)
+    assert.equal(/; Secure/.test(String(setCookie)), secureCookies)
+    const newCookie = String(setCookie).split(';')[0]
+    assert.ok(newCookie)
+    assert.notEqual(newCookie, firstCookie)
+    assert.notEqual(newCookie, secondCookie)
+
+    for (const cookie of [firstCookie, secondCookie]) {
+      const revoked = await app.inject({
+        headers: { cookie },
+        url: '/api/admin/content',
+      })
+      assert.equal(revoked.statusCode, 401)
+    }
+    const retained = await app.inject({
+      url: '/api/admin/content',
+      headers: { cookie: newCookie },
+    })
+    assert.equal(retained.statusCode, 200)
+    const oldLogin = await app.inject({
+      method: 'POST',
+      payload: { password },
+      url: '/api/auth/login',
+    })
+    assert.equal(oldLogin.statusCode, 401)
+    await signIn(app, newPassword)
+  }
+})
+
+test('password changes require a session, matching origin and the current password', async t => {
+  const { app, password } = await fixture(t)
+  const payload = {
+    currentPassword: password,
+    newPassword: 'chosen-new-password',
+  }
+  const anonymous = await app.inject({
+    payload,
+    method: 'PUT',
+    url: '/api/admin/password',
+  })
+  assert.equal(anonymous.statusCode, 401)
+
+  const cookie = await signIn(app, password)
+  const crossOrigin = await app.inject({
+    payload,
+    method: 'PUT',
+    url: '/api/admin/password',
+    headers: {
+      cookie,
+      host: 'site.example',
+      origin: 'http://other.example',
+    },
+  })
+  assert.equal(crossOrigin.statusCode, 403)
+
+  const wrongPassword = await app.inject({
+    method: 'PUT',
+    headers: { cookie },
+    url: '/api/admin/password',
+    payload: { ...payload, currentPassword: 'wrong-password' },
+  })
+  assert.equal(wrongPassword.statusCode, 401)
+  assert.equal(wrongPassword.headers['set-cookie'], undefined)
+  const retained = await app.inject({
+    headers: { cookie },
+    url: '/api/admin/content',
+  })
+  assert.equal(retained.statusCode, 200)
+  await signIn(app, password)
+})
+
+test('password change validation rejects invalid lengths and extra fields without changing access', async t => {
+  const { app, password } = await fixture(t)
+  const headers = { cookie: await signIn(app, password) }
+  for (const payload of [
+    { currentPassword: password, newPassword: 'a'.repeat(11) },
+    { currentPassword: password, newPassword: 'a'.repeat(1025) },
+    { currentPassword: '', newPassword: 'chosen-new-password' },
+    { currentPassword: 'a'.repeat(1025), newPassword: 'chosen-new-password' },
+    {
+      unexpected: true,
+      currentPassword: password,
+      newPassword: 'chosen-new-password',
+    },
+  ]) {
+    const response = await app.inject({
+      headers,
+      payload,
+      method: 'PUT',
+      url: '/api/admin/password',
+    })
+    assert.equal(response.statusCode, 400, response.body)
+    assert.equal(response.headers['set-cookie'], undefined)
+  }
+  const retained = await app.inject({ headers, url: '/api/admin/content' })
+  assert.equal(retained.statusCode, 200)
+  await signIn(app, password)
+})
+
+test('password changes have their own rate limit and failures preserve the current session', async t => {
+  const { app, password } = await fixture(t)
+  const headers = { cookie: await signIn(app, password) }
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const response = await app.inject({
+      headers,
+      method: 'PUT',
+      url: '/api/admin/password',
+      payload: {
+        currentPassword: 'wrong-password',
+        newPassword: 'chosen-new-password',
+      },
+    })
+    assert.equal(response.statusCode, 401, response.body)
+  }
+  const limited = await app.inject({
+    headers,
+    method: 'PUT',
+    url: '/api/admin/password',
+    payload: {
+      currentPassword: password,
+      newPassword: 'chosen-new-password',
+    },
+  })
+  assert.equal(limited.statusCode, 429)
+  assert.ok(Number(limited.headers['retry-after']) > 0)
+  const retained = await app.inject({ headers, url: '/api/admin/content' })
+  assert.equal(retained.statusCode, 200)
+  await signIn(app, password)
+})

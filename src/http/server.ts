@@ -1,22 +1,18 @@
 import Fastify from 'fastify'
 import { z, ZodError } from 'zod'
 import cookie from '@fastify/cookie'
+import type { FastifyReply } from 'fastify'
 
 import { AppError } from '../errors/index.js'
 import type { ServerOptions } from './types.js'
 import { openDatabase } from '../storage/index.js'
+import type { AuthSession } from '../auth/index.js'
 import { listOrders, simulateCheckout } from '../orders/index.js'
 import {
   createBackup,
   restoreBackup,
   MAX_BACKUP_BYTES,
 } from '../backups/index.js'
-import {
-  login,
-  logout,
-  authenticate,
-  isPasswordConfigured,
-} from '../auth/index.js'
 import {
   rateLimit,
   requireAdmin,
@@ -30,6 +26,13 @@ import {
   deleteMedia,
   MAX_IMAGE_BYTES,
 } from '../media/index.js'
+import {
+  login,
+  logout,
+  authenticate,
+  changePassword,
+  isPasswordConfigured,
+} from '../auth/index.js'
 import {
   getCurrent,
   getRevision,
@@ -76,6 +79,17 @@ export function createHttpServer(options: ServerOptions = {}) {
     sameSite: 'strict',
     secure: secureCookies,
   } as const
+
+  function sendSession(reply: FastifyReply, session: AuthSession) {
+    reply.setCookie(SESSION_COOKIE, session.token, {
+      ...cookieOptions,
+      expires: new Date(session.expiresAt),
+    })
+    return {
+      authenticated: true,
+      expiresAt: new Date(session.expiresAt).toISOString(),
+    }
+  }
 
   app.register(cookie)
   installRequestSecurity(app, secureCookies)
@@ -143,14 +157,7 @@ export function createHttpServer(options: ServerOptions = {}) {
         .strictObject({ password: z.string().min(1).max(1024) })
         .parse(request.body)
       const session = await login(db, password)
-      reply.setCookie(SESSION_COOKIE, session.token, {
-        ...cookieOptions,
-        expires: new Date(session.expiresAt),
-      })
-      return {
-        authenticated: true,
-        expiresAt: new Date(session.expiresAt).toISOString(),
-      }
+      return sendSession(reply, session)
     },
   )
   app.get('/api/auth/session', async request => ({
@@ -180,6 +187,14 @@ export function createHttpServer(options: ServerOptions = {}) {
   app.register(
     async admin => {
       admin.addHook('onRequest', async request => requireAdmin(db, request))
+      admin.put(
+        '/password',
+        { onRequest: rateLimit(5, 12_000) },
+        async (request, reply) => {
+          const session = await changePassword(db, request.body)
+          return sendSession(reply, session)
+        },
+      )
       admin.get('/content', async () => getCurrent(db))
       admin.get('/content/schema', async () =>
         z.toJSONSchema(siteContentSchema),
